@@ -1,0 +1,8 @@
+node_modules/
+public/audio/*.mp3
+public/audio/*.wav
+public/audio/*.ogg
+public/audio/*.flac
+public/audio/*.aac
+public/audio/*.m4a
+.env

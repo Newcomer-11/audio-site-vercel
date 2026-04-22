@@ -156,6 +156,8 @@
       .stats-row{flex-wrap:wrap;}
     }
   </style>
+  <!-- Vercel Blob client SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@vercel/blob@latest/dist/browser.umd.js"></script>
 </head>
 <body>
 
@@ -269,39 +271,61 @@ async function uploadFile(file) {
   const pa = document.getElementById('prog-area');
   const pf = document.getElementById('prog-fill');
   const pl = document.getElementById('prog-label');
-  pa.classList.add('show'); pf.style.width='0%';
-  pl.textContent = `Uploading: ${file.name}`;
+  pa.classList.add('show');
+  pf.style.width = '0%';
+  pl.textContent = `Chuẩn bị: ${file.name}`;
 
-  return new Promise((resolve) => {
-    const fd = new FormData(); fd.append('audio', file);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/admin/upload');
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        const p = Math.round(e.loaded/e.total*100);
-        pf.style.width = p+'%';
-        pl.textContent = `Uploading: ${file.name} (${p}%)`;
-      }
-    };
-    xhr.onload = () => {
-      const d = JSON.parse(xhr.responseText);
-      resolve(xhr.status===200 ? {ok:true} : {ok:false, err:d.error});
-    };
-    xhr.onerror = () => resolve({ok:false, err:'Network error'});
-    xhr.send(fd);
-  });
+  try {
+    // Bước 1: Lấy client token từ server (request nhỏ JSON)
+    const tokenRes = await fetch('/admin/upload-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok) return { ok: false, err: tokenData.error || 'Không lấy được token' };
+
+    // Bước 2: Upload thẳng lên Vercel Blob — không qua Vercel Function, không giới hạn size
+    const blob = await vercelBlob.upload(tokenData.pathname, file, {
+      access: 'public',
+      token: tokenData.clientToken,
+      onUploadProgress: ({ percentage }) => {
+        pf.style.width = percentage + '%';
+        if (percentage < 100) {
+          pl.textContent = `Uploading: ${file.name} (${percentage}%)`;
+        } else {
+          pl.textContent = `⏳ Hoàn tất, đang xác nhận...`;
+        }
+      },
+    });
+
+    pf.style.width = '100%';
+    pl.textContent = `✅ Xong: ${file.name}`;
+    return { ok: true, url: blob.url };
+
+  } catch (err) {
+    pl.textContent = `❌ Lỗi: ${err.message}`;
+    console.error('Upload error:', err);
+    return { ok: false, err: err.message };
+  }
 }
 
 async function handleFiles(files) {
-  let ok=0, fail=0;
+  let ok = 0, failMsgs = [];
   for (const f of files) {
     const r = await uploadFile(f);
-    r.ok ? ok++ : fail++;
+    if (r.ok) ok++;
+    else failMsgs.push(`${f.name}: ${r.err}`);
   }
+  // Giữ progress bar 1 giây để user thấy kết quả, rồi mới ẩn
+  await new Promise(r => setTimeout(r, 1000));
   document.getElementById('prog-area').classList.remove('show');
   document.getElementById('prog-fill').style.width = '0%';
   if (ok) toast(`[OK] Upload thành công ${ok} file`, 'ok');
-  if (fail) toast(`[ERROR] ${fail} file thất bại`, 'err');
+  if (failMsgs.length) {
+    console.error('Upload errors:', failMsgs);
+    toast(`[ERROR] ${failMsgs.length} file thất bại — xem Console để biết chi tiết`, 'err');
+  }
   loadTracks();
 }
 
