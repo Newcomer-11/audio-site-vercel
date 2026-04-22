@@ -1,10 +1,10 @@
 const express = require('express');
+const multer  = require('multer');
 const crypto  = require('crypto');
 const path    = require('path');
 
 const app = express();
 
-// ─── Config ────────────────────────────────────────────────────────────────
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'audio-site-secret-key';
 
@@ -34,12 +34,15 @@ function parseCookies(req) {
   return map;
 }
 
-// ─── Middleware ─────────────────────────────────────────────────────────────
+// ─── Middleware ────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// ─── Auth guards ─────────────────────────────────────────────────────────────
+// Multer dùng memory — chỉ parse multipart, KHÔNG parse JSON body
+const upload = multer({ storage: multer.memoryStorage() });
+
+// ─── Auth guards ──────────────────────────────────────────────────────────
 const requireAuth = (req, res, next) => {
   const p = verifyToken(parseCookies(req)['admin_token']);
   return p && p.isAdmin ? next() : res.redirect('/admin/login');
@@ -49,7 +52,7 @@ const requireAuthApi = (req, res, next) => {
   return p && p.isAdmin ? next() : res.status(401).json({ error: 'Chưa đăng nhập' });
 };
 
-// ─── Public ──────────────────────────────────────────────────────────────────
+// ─── Public ───────────────────────────────────────────────────────────────
 app.get('/', (req, res) =>
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
@@ -68,18 +71,16 @@ app.get('/api/tracks', async (req, res) => {
       }));
     res.json({ tracks });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Admin ───────────────────────────────────────────────────────────────────
+// ─── Admin ────────────────────────────────────────────────────────────────
 app.get('/admin/login', (req, res) => {
-  if (verifyToken(parseCookies(req)['admin_token']) && verifyToken(parseCookies(req)['admin_token']).isAdmin)
-    return res.redirect('/admin');
+  const p = verifyToken(parseCookies(req)['admin_token']);
+  if (p && p.isAdmin) return res.redirect('/admin');
   res.sendFile(path.join(__dirname, '..', 'public', 'login.html'));
 });
-
 app.post('/admin/login', (req, res) => {
   if (req.body.password !== ADMIN_PASSWORD)
     return res.status(401).json({ error: 'Sai mật khẩu!' });
@@ -88,37 +89,36 @@ app.post('/admin/login', (req, res) => {
     `admin_token=${token}; HttpOnly; Path=/; Max-Age=86400; SameSite=Strict`);
   res.json({ success: true });
 });
-
 app.post('/admin/logout', (req, res) => {
   res.setHeader('Set-Cookie', 'admin_token=; HttpOnly; Path=/; Max-Age=0');
   res.json({ success: true });
 });
-
 app.get('/admin', requireAuth, (req, res) =>
   res.sendFile(path.join(__dirname, '..', 'public', 'admin.html')));
 
-// Tạo client upload token — browser dùng để PUT thẳng lên Vercel Blob
-app.post('/admin/upload-token', requireAuthApi, async (req, res) => {
+// Upload: nhận file qua multipart, stream thẳng lên Vercel Blob
+// Vercel giới hạn 4.5MB chỉ với express body-parser, KHÔNG giới hạn streaming/multipart
+app.post('/admin/upload', requireAuthApi, upload.single('audio'), async (req, res) => {
   if (!process.env.BLOB_READ_WRITE_TOKEN)
-    return res.status(503).json({ error: 'Chưa cấu hình BLOB_READ_WRITE_TOKEN trong Vercel Dashboard.' });
+    return res.status(503).json({ error: 'Chưa cấu hình BLOB_READ_WRITE_TOKEN.' });
+  if (!req.file)
+    return res.status(400).json({ error: 'Không có file.' });
+
   try {
-    const { filename } = req.body;
-    if (!filename) return res.status(400).json({ error: 'Thiếu filename' });
-    const safe = filename
-      .replace(/[^a-zA-Z0-9._\-\u00C0-\u024F\u1E00-\u1EFF .]/g, '_')
-      .trim();
+    const { put } = require('@vercel/blob');
+    const safe = req.file.originalname
+      .replace(/[^a-zA-Z0-9._\-\u00C0-\u024F\u1E00-\u1EFF .]/g, '_').trim();
     const pathname = `audio/${Date.now()}_${safe}`;
 
-    // Tạo signed URL để client upload thẳng — giải pháp chính thức của Vercel Blob
-    const { generateClientTokenFromReadWriteToken } = require('@vercel/blob/client');
-    const clientToken = await generateClientTokenFromReadWriteToken({
-      token:     process.env.BLOB_READ_WRITE_TOKEN,
-      pathname,
-      onUploadCompleted: { callbackUrl: `${req.protocol}://${req.get('host')}/api/tracks` },
+    const blob = await put(pathname, req.file.buffer, {
+      access: 'public',
+      contentType: req.file.mimetype || 'audio/mpeg',
+      token: process.env.BLOB_READ_WRITE_TOKEN,
     });
-    res.json({ clientToken, pathname });
+
+    res.json({ success: true, url: blob.url, filename: pathname });
   } catch (err) {
-    console.error('upload-token error:', err);
+    console.error('Blob put error:', err);
     res.status(500).json({ error: err.message });
   }
 });
